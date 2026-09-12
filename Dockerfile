@@ -81,14 +81,18 @@ USER 0
 # Nodestore S3 : sans lui, le corps des evenements est stocke dans Postgres,
 # qui grossit de plusieurs Go par semaine.
 # L'image sentry 26.x est geree par uv : le venv /.venv (premier du PATH) ne
-# contient pas pip, et le Python systeme est verrouille (PEP 668). Installer
-# via uv en priorite, sinon ensurepip + pip du venv ; l'import final fait foi.
+# contient pas pip, et le Python systeme est verrouille (PEP 668). `uv pip`
+# ignore UV_PROJECT_ENVIRONMENT et exige un venv decouvrable, d'ou le
+# VIRTUAL_ENV explicite ; repli ensurepip + pip du venv si uv ne suffit pas.
+# L'import final fait foi.
 ARG NODESTORE_S3_REF
 RUN set -e; \
     url="https://github.com/getsentry/sentry-nodestore-s3/archive/${NODESTORE_S3_REF}.zip"; \
+    export VIRTUAL_ENV=/.venv; \
     if command -v uv >/dev/null 2>&1; then \
-        uv pip install --no-cache "$url"; \
-    else \
+        uv pip install --no-cache "$url" || echo "uv a echoue, repli sur pip"; \
+    fi; \
+    if ! python -c "import sentry_nodestore_s3" 2>/dev/null; then \
         python -m ensurepip --upgrade >/dev/null 2>&1 || true; \
         python -m pip install --no-cache-dir --disable-pip-version-check "$url"; \
     fi; \
