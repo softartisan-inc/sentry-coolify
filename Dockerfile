@@ -22,6 +22,8 @@ ARG TASKBROKER_IMAGE=ghcr.io/getsentry/taskbroker:26.8.0
 ARG CLICKHOUSE_IMAGE=altinity/clickhouse-server:25.3.6.10034.altinitystable
 ARG NGINX_IMAGE=nginx:1.31.3-alpine
 ARG VALKEY_IMAGE=valkey/valkey:8.1.9-alpine
+# Shell statique pour l'image relay, qui est distroless (voir stage relay).
+ARG BUSYBOX_IMAGE=busybox:1.37.0-musl
 # sentry-nodestore-s3 ne publie ni tag ni release PyPI : epingle par SHA de
 # commit pour garder le build reproductible.
 ARG NODESTORE_S3_REF=a1457f93d266485d101ae3b29fa03028bb3d63c2
@@ -78,18 +80,27 @@ USER 0
 
 # Nodestore S3 : sans lui, le corps des evenements est stocke dans Postgres,
 # qui grossit de plusieurs Go par semaine.
+# L'image sentry 26.x est geree par uv : le venv /.venv (premier du PATH) ne
+# contient pas pip, et le Python systeme est verrouille (PEP 668). Installer
+# via uv en priorite, sinon ensurepip + pip du venv ; l'import final fait foi.
 ARG NODESTORE_S3_REF
-RUN pip install --no-cache-dir --disable-pip-version-check \
-      "https://github.com/getsentry/sentry-nodestore-s3/archive/${NODESTORE_S3_REF}.zip" \
-    && python -c "import sentry_nodestore_s3"
+RUN set -e; \
+    url="https://github.com/getsentry/sentry-nodestore-s3/archive/${NODESTORE_S3_REF}.zip"; \
+    if command -v uv >/dev/null 2>&1; then \
+        uv pip install --no-cache "$url"; \
+    else \
+        python -m ensurepip --upgrade >/dev/null 2>&1 || true; \
+        python -m pip install --no-cache-dir --disable-pip-version-check "$url"; \
+    fi; \
+    python -c "import sentry_nodestore_s3"
 
 COPY --from=upstream /src/sentry/ /etc/sentry/
 COPY --from=upstream /src/geoip/ /geoip/
-COPY overlays/bootstrap.sh /usr/local/bin/sa-bootstrap
+COPY --chmod=755 overlays/bootstrap.sh /usr/local/bin/sa-bootstrap
 
 # Entrypoint : celui d'upstream, plus la prise en charge des CA personnalisees
 # montees sur /usr/local/share/ca-certificates.
-COPY <<'EOF' /etc/sentry/entrypoint.sh
+COPY --chmod=755 <<'EOF' /etc/sentry/entrypoint.sh
 #!/bin/bash
 set -e
 if [ -d /usr/local/share/ca-certificates ] && [ -n "$(ls -A /usr/local/share/ca-certificates/ 2>/dev/null)" ]; then
@@ -97,8 +108,6 @@ if [ -d /usr/local/share/ca-certificates ] && [ -n "$(ls -A /usr/local/share/ca-
 fi
 source /docker-entrypoint.sh
 EOF
-
-RUN chmod +x /etc/sentry/entrypoint.sh /usr/local/bin/sa-bootstrap
 
 ENV SENTRY_CONF=/etc/sentry \
     PYTHONUSERBASE=/data/custom-packages \
@@ -119,8 +128,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends cron \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=upstream /src/cron/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+COPY --chmod=755 --from=upstream /src/cron/entrypoint.sh /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]
 
@@ -148,18 +156,26 @@ COPY --from=upstream /src/nginx.conf /etc/nginx/nginx.conf
 
 # ---------------------------------------------------------------------------
 # Stage 6 — Relay (config + credentials generes au premier demarrage)
+#
+# L'image relay 26.x est distroless (User 65532, entrypoint /bin/relay, ni
+# shell ni coreutils) : le stage n'a aucun RUN, et busybox statique fournit le
+# sh minimal dont l'entrypoint de generation des credentials a besoin.
 # ---------------------------------------------------------------------------
+FROM ${BUSYBOX_IMAGE} AS busybox
+
 FROM ${RELAY_IMAGE} AS relay
 LABEL org.opencontainers.image.source="https://github.com/softartisan-inc/sentry-coolify"
 USER 0
+COPY --from=busybox /bin/ /busybox/
 COPY --from=upstream /src/relay/config.yml /etc/relay/config.yml
 COPY --from=upstream /src/geoip/ /geoip/
 
 # Relay a besoin d'un couple de cles persistant. Upstream le genere depuis
 # l'hote via install.sh ; ici le service se debrouille seul.
-COPY <<'EOF' /usr/local/bin/sa-relay-entrypoint
-#!/bin/sh
+COPY --chmod=755 <<'EOF' /usr/local/bin/sa-relay-entrypoint
+#!/busybox/sh
 set -e
+export PATH="/busybox:$PATH"
 RELAY_HOME="${RELAY_HOME:-/work/.relay}"
 mkdir -p "$RELAY_HOME"
 [ -f "$RELAY_HOME/config.yml" ] || cp /etc/relay/config.yml "$RELAY_HOME/config.yml"
@@ -171,8 +187,7 @@ fi
 exec relay "$@"
 EOF
 
-RUN chmod +x /usr/local/bin/sa-relay-entrypoint
-ENTRYPOINT ["/usr/local/bin/sa-relay-entrypoint"]
+ENTRYPOINT ["/busybox/sh", "/usr/local/bin/sa-relay-entrypoint"]
 CMD ["run"]
 
 # ---------------------------------------------------------------------------

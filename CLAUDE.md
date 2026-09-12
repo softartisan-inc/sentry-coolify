@@ -56,7 +56,7 @@ Les 9 cibles publiées, plus le stage intermédiaire :
 | `snuba` | `snuba-sa` | `api_healthcheck.py` |
 | `clickhouse` | `clickhouse-sa` | `config.d/sentry.xml`, `users.d/default-password.xml` |
 | `nginx` | `nginx-sa` | `nginx.conf` upstream |
-| `relay` | `relay-sa` | `config.yml` + entrypoint qui génère `credentials.json` au premier boot |
+| `relay` | `relay-sa` | `config.yml` + busybox statique + entrypoint qui génère `credentials.json` au premier boot |
 | `symbolicator` | `symbolicator-sa` | `config.yml` |
 | `taskbroker` | `taskbroker-sa` | `config.yml` |
 | `valkey` | `valkey-sa` | `redis.conf` upstream (`maxmemory-policy volatile-lru`) |
@@ -185,6 +185,12 @@ docker compose run --rm -v /backup:/backup sentry-bootstrap \
   cause n°1 d'OOM sur les instances Sentry auto-hébergées.
 - **Images amd64 uniquement.** Les images amont Sentry ne sont pas publiées en
   arm64 ; le workflow force `platforms: linux/amd64`.
+- **Deux images amont ont des particularités de build** (découvertes au premier
+  build CI, à revérifier à chaque montée de version) : `relay` est distroless
+  (User 65532, ni shell ni coreutils) — son stage n'a aucun `RUN` et embarque
+  busybox statique (`/busybox/sh`) pour l'entrypoint ; `sentry` est gérée par
+  uv (venv `/.venv` sans pip, Python système verrouillé PEP 668) — installer
+  les paquets via `uv pip install`, jamais `pip` nu.
 - **Les `deploy.resources.limits` sont des plafonds anti-fuite, pas des
   réservations.** Leur somme (~16 Go, dont 1,5 Go pour les deux one-shot d'init)
   dépasse volontairement la RAM cible (12 Go).
