@@ -201,10 +201,15 @@ docker compose run --rm -v /backup:/backup sentry-bootstrap \
   profiling / crons / uptime demande ~29 services de plus et environ le double de
   RAM. Ne pas ajouter un service isolé de ces familles sans réintroduire ses
   consumers Snuba et ses topics Kafka.
-- **Commits sans lignes d'attribution.** La politique du dépôt (README, section
-  « Commits sans co-auteur ») est de n'ajouter **aucune** ligne `Co-Authored-By`
-  ni `Generated with [Claude Code]` aux commits et PR. Deux verrous : cette
+- **Commits sans lignes d'attribution.** Politique du dépôt : n'ajouter
+  **aucune** ligne `Co-Authored-By` ni `Generated with [Claude Code]` aux
+  commits et PR (détaillée dans `NOTES.md`, non versionné). Deux verrous : cette
   consigne et le bloc `attribution` de `.claude/settings.json`. Aucun hook git,
   par choix assumé — ne pas en recréer. L'identité de commit est portée par le
   `git config` local : la vérifier avec `git var GIT_AUTHOR_IDENT` avant de
   committer.
+- **`NOTES.md` (non versionné) porte les procédures internes** retirées du
+  README public : déploiement sur Coolify, mise à jour, contribution à Coolify
+  (template + PR docs), politique de commits. Ce fichier n'existe que
+  localement — un clone neuf ne l'a pas. Ne pas réintroduire ces sections dans
+  le README.

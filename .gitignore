@@ -1,4 +1,5 @@
 .idea
 .env
+NOTES.md
 docker-compose.flat.yaml
 *.tmp
