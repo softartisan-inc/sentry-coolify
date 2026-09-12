@@ -189,8 +189,11 @@ docker compose run --rm -v /backup:/backup sentry-bootstrap \
   build CI, à revérifier à chaque montée de version) : `relay` est distroless
   (User 65532, ni shell ni coreutils) — son stage n'a aucun `RUN` et embarque
   busybox statique (`/busybox/sh`) pour l'entrypoint ; `sentry` est gérée par
-  uv (venv `/.venv` sans pip, Python système verrouillé PEP 668) — installer
-  les paquets via `uv pip install`, jamais `pip` nu.
+  uv (Python système verrouillé PEP 668) — installer les paquets via `uv pip
+  install` avec `VIRTUAL_ENV=/.venv` exporté (`uv pip` ignore
+  `UV_PROJECT_ENVIRONMENT`), et ne jamais vérifier par un import réel au build :
+  importer `sentry_nodestore_s3` lit les settings Django à l'import →
+  `find_spec` uniquement.
 - **Les `deploy.resources.limits` sont des plafonds anti-fuite, pas des
   réservations.** Leur somme (~16 Go, dont 1,5 Go pour les deux one-shot d'init)
   dépasse volontairement la RAM cible (12 Go).
