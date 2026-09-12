@@ -1,0 +1,28 @@
+name: validate-compose
+
+# Valide la syntaxe et la resolution des ancres des deux fichiers compose.
+# Workflow separe de build-images : une modification du compose seul ne doit
+# pas redeclencher la construction des 9 images.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docker-compose.yaml"
+      - "sentry.yaml"
+      - ".env.example"
+      - ".github/workflows/validate-compose.yml"
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verifier les deux fichiers compose
+        run: |
+          cp .env.example .env
+          echo "SERVICE_PASSWORD_SENTRYSECRET=ci-placeholder" >> .env
+          docker compose config --quiet
+          docker compose -f sentry.yaml config --quiet
+          echo "OK — $(docker compose config --services | wc -l) services"

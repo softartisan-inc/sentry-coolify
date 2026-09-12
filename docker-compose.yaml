@@ -1,0 +1,572 @@
+# ---------------------------------------------------------------------------
+# Sentry self-hosted 26.8.0 — stack Coolify
+# https://github.com/softartisan-inc/sentry-coolify
+#
+# Profil "errors-only" : 30 services au lieu de 57 (28 perennes + 2 one-shot
+# d'initialisation). Sont exclus le tracing de performance, les metrics, les
+# replays, le profiling, les crons et l'uptime monitoring. Le monitoring
+# d'erreurs, les alertes, les integrations et les sourcemaps restent complets.
+#
+# Aucun bind mount : toute la configuration est bakee dans les images publiees
+# sur ghcr.io/softartisan-inc (voir Dockerfile). C'est ce qui rend la stack
+# deployable depuis un simple fichier compose sous Coolify.
+#
+# Dimensionnement de reference : 6 vCPU, 12 Go RAM, 8 Go swap, NVMe.
+# La somme des `limits` vaut ~16 Go a dessein, dont 1,5 Go pour les deux
+# one-shot d'init — ce sont des plafonds anti-fuite, pas des reservations.
+# Consommation reelle observee au repos : 7 a 9 Go.
+# ---------------------------------------------------------------------------
+
+x-restart: &restart
+  restart: unless-stopped
+
+x-healthy: &healthy
+  condition: service_healthy
+
+x-started: &started
+  condition: service_started
+
+x-bootstrapped: &bootstrapped
+  sentry-bootstrap:
+    condition: service_completed_successfully
+
+x-hc: &hc
+  interval: 30s
+  timeout: 30s
+  retries: 10
+  start_period: 60s
+
+# Les consumers ecrivent un fichier de heartbeat plutot que d'exposer un port.
+x-hc-file: &hc-file
+  test:
+    - "CMD"
+    - "python3"
+    - "-c"
+    - |
+      import os, sys
+      try:
+          os.remove('/tmp/health.txt')
+      except FileNotFoundError:
+          print('consumer heartbeat file missing', file=sys.stderr)
+          sys.exit(1)
+  interval: 60s
+  timeout: 10s
+  retries: 3
+  start_period: 600s
+
+x-sentry: &sentry
+  <<: *restart
+  image: "${SENTRY_SA_IMAGE:-ghcr.io/softartisan-inc/sentry-sa:26.8.0}"
+  depends_on:
+    <<: *bootstrapped
+    redis: *healthy
+    kafka: *healthy
+    pgbouncer: *healthy
+    memcached: *started
+    seaweedfs: *healthy
+    snuba-api: *started
+    symbolicator: *started
+  environment:
+    SENTRY_CONF: /etc/sentry
+    PYTHONUSERBASE: /data/custom-packages
+    SNUBA: http://snuba-api:1218
+    COMPOSE_PROFILES: errors-only
+    SENTRY_SYSTEM_SECRET_KEY: "${SERVICE_PASSWORD_SENTRYSECRET:?secret manquant}"
+    SENTRY_SYSTEM_URL_PREFIX: "${SERVICE_FQDN_SENTRY:-http://localhost:9000}"
+    SENTRY_CSRF_TRUSTED_ORIGINS: "${SENTRY_CSRF_TRUSTED_ORIGINS:-}"
+    SENTRY_EVENT_RETENTION_DAYS: "${SENTRY_EVENT_RETENTION_DAYS:-30}"
+    SENTRY_ALLOW_REGISTRATION: "${SENTRY_ALLOW_REGISTRATION:-false}"
+    SENTRY_WEB_WORKERS: "${SENTRY_WEB_WORKERS:-2}"
+    SENTRY_WEB_THREADS: "${SENTRY_WEB_THREADS:-4}"
+    SENTRY_MAIL_HOST: "${SENTRY_MAIL_HOST:-}"
+    SENTRY_SMTP_HOST: "${SENTRY_SMTP_HOST:-}"
+    SENTRY_SMTP_PORT: "${SENTRY_SMTP_PORT:-587}"
+    SENTRY_SMTP_USERNAME: "${SENTRY_SMTP_USERNAME:-}"
+    SENTRY_SMTP_PASSWORD: "${SENTRY_SMTP_PASSWORD:-}"
+    SENTRY_SMTP_FROM: "${SENTRY_SMTP_FROM:-}"
+    SENTRY_KAFKA_MAX_POLL_INTERVAL_MS: "${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS:-300000}"
+  volumes:
+    - sentry-data:/data
+
+x-snuba: &snuba
+  <<: *restart
+  image: "${SNUBA_SA_IMAGE:-ghcr.io/softartisan-inc/snuba-sa:26.8.0}"
+  depends_on:
+    snuba-bootstrap:
+      condition: service_completed_successfully
+    clickhouse: *healthy
+    kafka: *healthy
+    redis: *healthy
+  environment:
+    SNUBA_SETTINGS: self_hosted
+    CLICKHOUSE_HOST: clickhouse
+    DEFAULT_BROKERS: "kafka:9092"
+    REDIS_HOST: redis
+    UWSGI_MAX_REQUESTS: "10000"
+    UWSGI_DISABLE_LOGGING: "true"
+    UWSGI_PROCESSES: "${SNUBA_UWSGI_PROCESSES:-2}"
+    UWSGI_THREADS: "${SNUBA_UWSGI_THREADS:-2}"
+    SENTRY_EVENT_RETENTION_DAYS: "${SENTRY_EVENT_RETENTION_DAYS:-30}"
+    SENTRY_KAFKA_MAX_POLL_INTERVAL_MS: "${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS:-300000}"
+
+# Plafonds memoire. Un consumer Rust tourne a ~150 Mo, un consumer Python a
+# ~350 Mo : les limites laissent de la marge sans autoriser une fuite.
+x-lim-xs: &lim-xs
+  deploy: { resources: { limits: { memory: 128M } } }
+x-lim-s: &lim-s
+  deploy: { resources: { limits: { memory: 384M } } }
+x-lim-m: &lim-m
+  deploy: { resources: { limits: { memory: 512M } } }
+x-lim-l: &lim-l
+  deploy: { resources: { limits: { memory: 768M } } }
+x-lim-xl: &lim-xl
+  deploy: { resources: { limits: { memory: 1G } } }
+
+services:
+
+  # =========================================================================
+  # Donnees et transport
+  # =========================================================================
+
+  postgres:
+    <<: [*restart, *lim-xl]
+    image: "postgres:14.23-bookworm"
+    environment:
+      POSTGRES_HOST_AUTH_METHOD: trust
+    # `pgbouncer` mutualise les connexions : sans lui, chaque consumer ouvre
+    # son propre pool et Postgres sature ses 100 slots par defaut.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - effective_cache_size=768MB
+      - -c
+      - work_mem=8MB
+      - -c
+      - maintenance_work_mem=128MB
+      - -c
+      - max_connections=200
+    shm_size: 256m
+    volumes:
+      - sentry-postgres:/var/lib/postgresql/data
+    healthcheck:
+      <<: *hc
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+
+  pgbouncer:
+    <<: [*restart, *lim-xs]
+    image: "edoburu/pgbouncer:v1.25.2-p0"
+    depends_on:
+      postgres: *healthy
+    environment:
+      DB_USER: postgres
+      DB_HOST: postgres
+      DB_NAME: postgres
+      AUTH_TYPE: trust
+      POOL_MODE: transaction
+      ADMIN_USERS: postgres,sentry
+      MAX_CLIENT_CONN: 10000
+      DEFAULT_POOL_SIZE: 40
+    healthcheck:
+      <<: *hc
+      test: ["CMD-SHELL", "psql -U postgres -p 5432 -h 127.0.0.1 -tA -c 'select 1;' -d postgres >/dev/null"]
+
+  redis:
+    <<: [*restart, *lim-m]
+    image: "${VALKEY_SA_IMAGE:-ghcr.io/softartisan-inc/valkey-sa:26.8.0}"
+    # Redis sert a la fois de cache et de file : `volatile-lru` (herite de
+    # redis.conf upstream) evite d'evincer les cles de traitement.
+    command:
+      - valkey-server
+      - /usr/local/etc/redis/redis.conf
+      - --maxmemory
+      - "${REDIS_MAXMEMORY:-384mb}"
+    ulimits:
+      nofile: { soft: 10032, hard: 10032 }
+    volumes:
+      - sentry-redis:/data
+    healthcheck:
+      <<: *hc
+      test: ["CMD-SHELL", "valkey-cli ping | grep PONG"]
+
+  memcached:
+    <<: [*restart, *lim-xs]
+    image: "memcached:1.6.45-alpine"
+    command: ["-I", "${SENTRY_MAX_EXTERNAL_SOURCEMAP_SIZE:-1M}", "-m", "64"]
+    healthcheck:
+      <<: *hc
+      test: ["CMD-SHELL", "echo stats | nc 127.0.0.1 11211"]
+
+  kafka:
+    <<: *restart
+    image: "confluentinc/cp-kafka:7.6.6"
+    environment:
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1001@127.0.0.1:29093"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_NODE_ID: "1001"
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:29092,INTERNAL://0.0.0.0:9093,EXTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:29093"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://127.0.0.1:29092,INTERNAL://kafka:9093,EXTERNAL://kafka:9092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_OFFSETS_TOPIC_NUM_PARTITIONS: "1"
+      # Retention courte : Kafka n'est qu'un tampon ici, les donnees durables
+      # vivent dans ClickHouse. 3 h suffisent et economisent plusieurs Go.
+      KAFKA_LOG_RETENTION_HOURS: "${KAFKA_LOG_RETENTION_HOURS:-3}"
+      KAFKA_LOG_SEGMENT_BYTES: "268435456"
+      KAFKA_MESSAGE_MAX_BYTES: "50000000"
+      KAFKA_MAX_REQUEST_SIZE: "50000000"
+      CONFLUENT_SUPPORT_METRICS_ENABLE: "false"
+      KAFKA_LOG4J_ROOT_LOGLEVEL: "WARN"
+      KAFKA_TOOLS_LOG4J_LOGLEVEL: "WARN"
+      KAFKA_LOG4J_LOGGERS: "kafka.cluster=WARN,kafka.controller=WARN,kafka.coordinator=WARN,kafka.log=WARN,kafka.server=WARN,state.change.logger=WARN"
+      # Sans plafond explicite, la JVM prend 25 % de la RAM de l'hote et
+      # ignore la limite du conteneur : c'est la cause n°1 d'OOM sur Sentry.
+      KAFKA_HEAP_OPTS: "${KAFKA_HEAP_OPTS:--Xmx768m -Xms768m}"
+    ulimits:
+      nofile: { soft: 100000, hard: 100000 }
+    volumes:
+      - sentry-kafka:/var/lib/kafka/data
+      - sentry-kafka-log:/var/lib/kafka/log
+      - sentry-secrets:/etc/kafka/secrets
+    deploy:
+      resources:
+        limits:
+          memory: "${KAFKA_MEM_LIMIT:-1536M}"
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
+
+  clickhouse:
+    <<: *restart
+    image: "${CLICKHOUSE_SA_IMAGE:-ghcr.io/softartisan-inc/clickhouse-sa:26.8.0}"
+    environment:
+      # Ratio applique a la limite cgroup du conteneur, pas a la RAM de l'hote :
+      # 0.6 x 2 Go = 1.2 Go de budget serveur pour ClickHouse.
+      MAX_MEMORY_USAGE_RATIO: "${CLICKHOUSE_MEMORY_RATIO:-0.6}"
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    volumes:
+      - sentry-clickhouse:/var/lib/clickhouse
+      - sentry-clickhouse-log:/var/log/clickhouse-server
+    deploy:
+      resources:
+        limits:
+          memory: "${CLICKHOUSE_MEM_LIMIT:-2G}"
+    healthcheck:
+      test: ["CMD-SHELL", "HTTP_PROXY='' http_proxy='' wget -nv -t1 --spider 'http://localhost:8123/' || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
+
+  seaweedfs:
+    <<: [*restart, *lim-m]
+    image: "chrislusf/seaweedfs:4.40_large_disk@sha256:d07aa1dae03c687e0737b86130ded1b18474211a09e85d737fbe5508b8805139"
+    entrypoint: "weed"
+    command: >-
+      mini
+      -dir=/data
+      -filer.defaultReplicaPlacement=000
+      -metricsPort=9091
+      -volume.dir.idx=/data/idx
+      -volume.index=leveldbLarge
+      -volume.preStopSeconds=8
+      -volume.readMode=redirect
+      -ip.bind=0.0.0.0
+      -webdav=false
+    environment:
+      AWS_ACCESS_KEY_ID: "${SENTRY_S3_ACCESS_KEY:-sentry}"
+      AWS_SECRET_ACCESS_KEY: "${SENTRY_S3_SECRET_KEY:-sentry}"
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      http_proxy: ""
+      https_proxy: ""
+    volumes:
+      - sentry-seaweedfs:/data
+    healthcheck:
+      test: ["CMD-SHELL", "http_proxy='' wget -q -O- http://localhost:9340/healthz http://localhost:9333/cluster/healthz http://localhost:8333/healthz || exit 1"]
+      interval: 30s
+      timeout: 20s
+      retries: 5
+      start_period: 60s
+
+  smtp:
+    <<: [*restart, *lim-xs]
+    # Epingle sur la version que :latest resolvait au moment du gel (l'amont
+    # getsentry/self-hosted la reference sans tag, seul ecart a notre principe).
+    image: "registry.gitlab.com/egos-tech/smtp:2.0.7"
+    environment:
+      MAILNAME: "${SENTRY_MAIL_HOST:-}"
+    volumes:
+      - sentry-smtp:/var/spool/exim4
+      - sentry-smtp-log:/var/log/exim4
+
+  # =========================================================================
+  # Initialisation — jouee a chaque demarrage, idempotente
+  # =========================================================================
+
+  snuba-bootstrap:
+    image: "${SNUBA_SA_IMAGE:-ghcr.io/softartisan-inc/snuba-sa:26.8.0}"
+    restart: "no"
+    command: ["bootstrap", "--force"]
+    depends_on:
+      clickhouse: *healthy
+      kafka: *healthy
+      redis: *healthy
+    environment:
+      SNUBA_SETTINGS: self_hosted
+      CLICKHOUSE_HOST: clickhouse
+      DEFAULT_BROKERS: "kafka:9092"
+      REDIS_HOST: redis
+      SENTRY_EVENT_RETENTION_DAYS: "${SENTRY_EVENT_RETENTION_DAYS:-30}"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  sentry-bootstrap:
+    image: "${SENTRY_SA_IMAGE:-ghcr.io/softartisan-inc/sentry-sa:26.8.0}"
+    restart: "no"
+    entrypoint: ["/etc/sentry/entrypoint.sh"]
+    command: ["/usr/local/bin/sa-bootstrap"]
+    depends_on:
+      snuba-bootstrap:
+        condition: service_completed_successfully
+      pgbouncer: *healthy
+      seaweedfs: *healthy
+      kafka: *healthy
+      redis: *healthy
+    environment:
+      SENTRY_CONF: /etc/sentry
+      SNUBA: http://snuba-api:1218
+      COMPOSE_PROFILES: errors-only
+      SENTRY_SYSTEM_SECRET_KEY: "${SERVICE_PASSWORD_SENTRYSECRET:?secret manquant}"
+      SENTRY_SYSTEM_URL_PREFIX: "${SERVICE_FQDN_SENTRY:-http://localhost:9000}"
+      SENTRY_EVENT_RETENTION_DAYS: "${SENTRY_EVENT_RETENTION_DAYS:-30}"
+      SENTRY_S3_ENDPOINT: "http://seaweedfs:8333"
+      SENTRY_S3_ACCESS_KEY: "${SENTRY_S3_ACCESS_KEY:-sentry}"
+      SENTRY_S3_SECRET_KEY: "${SENTRY_S3_SECRET_KEY:-sentry}"
+      SENTRY_ADMIN_EMAIL: "${SENTRY_ADMIN_EMAIL:-}"
+      SENTRY_ADMIN_PASSWORD: "${SERVICE_PASSWORD_SENTRYADMIN:-}"
+    volumes:
+      - sentry-data:/data
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  # =========================================================================
+  # Snuba — lecture/ecriture ClickHouse
+  # =========================================================================
+
+  snuba-api:
+    <<: [*snuba, *lim-m]
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "python3", "/usr/src/snuba/api_healthcheck.py"]
+
+  snuba-errors-consumer:
+    <<: [*snuba, *lim-s]
+    command: rust-consumer --storage errors --consumer-group snuba-consumers --auto-offset-reset=latest --max-batch-time-ms 750 --no-strict-offset-reset --health-check-file /tmp/health.txt --max-poll-interval-ms ${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS:-300000}
+    healthcheck: *hc-file
+
+  snuba-outcomes-consumer:
+    <<: [*snuba, *lim-s]
+    command: rust-consumer --storage outcomes_raw --consumer-group snuba-consumers --auto-offset-reset=earliest --max-batch-time-ms 750 --no-strict-offset-reset --health-check-file /tmp/health.txt --max-poll-interval-ms ${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS:-300000}
+    healthcheck: *hc-file
+
+  snuba-outcomes-billing-consumer:
+    <<: [*snuba, *lim-s]
+    command: rust-consumer --storage outcomes_raw --consumer-group snuba-consumers --auto-offset-reset=earliest --max-batch-time-ms 750 --no-strict-offset-reset --raw-events-topic outcomes-billing --health-check-file /tmp/health.txt --max-poll-interval-ms ${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS:-300000}
+    healthcheck: *hc-file
+
+  snuba-group-attributes-consumer:
+    <<: [*snuba, *lim-s]
+    command: rust-consumer --storage group_attributes --consumer-group snuba-group-attributes-consumers --auto-offset-reset=latest --max-batch-time-ms 750 --no-strict-offset-reset --health-check-file /tmp/health.txt --max-poll-interval-ms ${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS:-300000}
+    healthcheck: *hc-file
+
+  snuba-replacer:
+    <<: [*snuba, *lim-s]
+    command: replacer --storage errors --auto-offset-reset=latest --no-strict-offset-reset --health-check-file /tmp/health.txt --max-poll-interval-ms ${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS:-300000}
+    healthcheck: *hc-file
+
+  snuba-subscription-consumer-events:
+    <<: [*snuba, *lim-s]
+    command: subscriptions-scheduler-executor --dataset events --entity events --auto-offset-reset=latest --no-strict-offset-reset --consumer-group=snuba-events-subscriptions-consumers --followed-consumer-group=snuba-consumers --schedule-ttl=60 --stale-threshold-seconds=900 --health-check-file /tmp/health.txt
+    healthcheck: *hc-file
+
+  snuba-subscription-consumer-eap-items:
+    <<: [*snuba, *lim-s]
+    command: subscriptions-scheduler-executor --dataset events_analytics_platform --entity eap_items --auto-offset-reset=latest --no-strict-offset-reset --consumer-group=snuba-eap-items-subscriptions-consumers --followed-consumer-group=eap_items_group --schedule-ttl=60 --stale-threshold-seconds=900 --health-check-file /tmp/health.txt
+    healthcheck: *hc-file
+
+  # =========================================================================
+  # Symbolication (stack traces natives et sourcemaps)
+  # =========================================================================
+
+  symbolicator:
+    <<: [*restart, *lim-m]
+    image: "${SYMBOLICATOR_SA_IMAGE:-ghcr.io/softartisan-inc/symbolicator-sa:26.8.0}"
+    command: run -c /etc/symbolicator/config.yml
+    volumes:
+      - sentry-symbolicator:/data
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "/bin/symbolicator", "healthcheck", "-c", "/etc/symbolicator/config.yml"]
+
+  symbolicator-cleanup:
+    <<: [*restart, *lim-xs]
+    image: "${SYMBOLICATOR_SA_IMAGE:-ghcr.io/softartisan-inc/symbolicator-sa:26.8.0}"
+    command: cleanup -c /etc/symbolicator/config.yml --repeat 1h
+    volumes:
+      - sentry-symbolicator:/data
+
+  # =========================================================================
+  # Sentry — interface, ingestion, taches
+  # =========================================================================
+
+  web:
+    <<: [*sentry, *lim-xl]
+    command: ["run", "web"]
+    ulimits:
+      nofile: { soft: 4096, hard: 4096 }
+    healthcheck:
+      <<: *hc
+      start_period: 300s
+      test:
+        - "CMD"
+        - "/bin/bash"
+        - "-c"
+        - 'exec 3<>/dev/tcp/127.0.0.1/9000 && echo -e "GET /_health/ HTTP/1.1\r\nhost: 127.0.0.1\r\n\r\n" >&3 && grep ok -s -m 1 <&3'
+
+  events-consumer:
+    <<: [*sentry, *lim-m]
+    command: run consumer ingest-events --consumer-group ingest-consumer --auto-offset-reset=earliest --no-strict-offset-reset --healthcheck-file-path /tmp/health.txt --max-poll-interval-ms ${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS:-300000}
+    healthcheck: *hc-file
+
+  attachments-consumer:
+    <<: [*sentry, *lim-m]
+    command: run consumer ingest-attachments --consumer-group ingest-consumer --auto-offset-reset=earliest --no-strict-offset-reset --healthcheck-file-path /tmp/health.txt --max-poll-interval-ms ${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS:-300000}
+    healthcheck: *hc-file
+
+  post-process-forwarder-errors:
+    <<: [*sentry, *lim-m]
+    command: run consumer post-process-forwarder-errors --auto-offset-reset=earliest --no-strict-offset-reset --consumer-group post-process-forwarder --synchronize-commit-log-topic=snuba-commit-log --synchronize-commit-group=snuba-consumers --healthcheck-file-path /tmp/health.txt --max-poll-interval-ms ${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS:-300000}
+    healthcheck: *hc-file
+
+  taskbroker:
+    <<: [*restart, *lim-s]
+    image: "${TASKBROKER_SA_IMAGE:-ghcr.io/softartisan-inc/taskbroker-sa:26.8.0}"
+    command: /opt/taskbroker -c /etc/taskbroker/config.yml
+    depends_on:
+      kafka: *healthy
+    environment:
+      TASKBROKER_KAFKA_CLUSTERS__DEFAULT__ADDRESS: "kafka:9092"
+      TASKBROKER_DB_PATH: "/opt/sqlite/taskbroker-activations.sqlite"
+    volumes:
+      - sentry-taskbroker:/opt/sqlite
+
+  taskscheduler:
+    <<: [*sentry, *lim-s]
+    command: ["run", "taskworker-scheduler"]
+
+  taskworker:
+    <<: [*sentry, *lim-l]
+    # Chaque unite de concurrence est un process Python complet (~300 Mo).
+    # 2 suffit pour une instance interne ; monter a 4 double la RAM du service.
+    command: run taskworker --concurrency=${SENTRY_TASKWORKER_CONCURRENCY:-2} --rpc-host=taskbroker:50051 --health-check-file-path=/tmp/health.txt --max-child-task-count=10000
+    depends_on:
+      <<: *bootstrapped
+      taskbroker: *started
+      redis: *healthy
+      kafka: *healthy
+      pgbouncer: *healthy
+      memcached: *started
+      seaweedfs: *healthy
+      snuba-api: *started
+      symbolicator: *started
+    healthcheck: *hc-file
+
+  sentry-cleanup:
+    <<: [*sentry, *lim-s]
+    image: "${SENTRY_CLEANUP_SA_IMAGE:-ghcr.io/softartisan-inc/sentry-cleanup-sa:26.8.0}"
+    entrypoint: "/entrypoint.sh"
+    command: '"0 3 * * * gosu sentry sentry cleanup --days ${SENTRY_EVENT_RETENTION_DAYS:-30}"'
+
+  # =========================================================================
+  # Bordure : relay (ingestion DSN) et nginx (routage /api/store vs UI)
+  # =========================================================================
+
+  relay:
+    <<: [*restart, *lim-m]
+    image: "${RELAY_SA_IMAGE:-ghcr.io/softartisan-inc/relay-sa:26.8.0}"
+    command: ["run"]
+    depends_on:
+      kafka: *healthy
+      redis: *healthy
+      web: *healthy
+    volumes:
+      - sentry-relay:/work/.relay
+
+  nginx:
+    <<: [*restart, *lim-xs]
+    image: "${NGINX_SA_IMAGE:-ghcr.io/softartisan-inc/nginx-sa:26.8.0}"
+    environment:
+      # ---- Domaine : fonctionnement Coolify standard ----------------------
+      # Cette variable magique fait apparaitre le champ "Domains" sur le
+      # service nginx dans l'UI Coolify. Coolify genere le certificat, pose
+      # les labels Traefik vers ce conteneur, et publie ${SERVICE_FQDN_SENTRY}
+      # (URL complete avec schema) + ${SERVICE_URL_SENTRY} (sans schema) pour
+      # tous les services de la stack.
+      #
+      # Le "80" est le port INTERNE de nginx, pas le port public : le public
+      # reste 80/443 gere par Traefik. Pour changer le domaine, editez-le dans
+      # l'UI puis REDEPLOYEZ : les conteneurs Sentry lisent l'URL au demarrage
+      # via SENTRY_SYSTEM_URL_PREFIX, un simple restart ne suffit pas.
+      - SERVICE_FQDN_SENTRY_80
+    expose:
+      - "80"
+    ports:
+      # Acces direct sans Traefik (dev local, tunnel SSH, debug). Par defaut
+      # bind uniquement la loopback de l'hote : sous Coolify c'est inoffensif
+      # et n'interfere pas avec le routage Traefik. Supprimez ces deux lignes
+      # pour ne rien publier du tout.
+      - "${SENTRY_BIND:-127.0.0.1:9000}:80"
+    depends_on:
+      web:
+        condition: service_healthy
+        restart: true
+      relay:
+        condition: service_started
+        restart: true
+    volumes:
+      - sentry-nginx-cache:/var/cache/nginx
+      - sentry-nginx-www:/var/www
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "/usr/bin/curl", "http://localhost"]
+
+volumes:
+  sentry-data:
+  sentry-postgres:
+  sentry-redis:
+  sentry-kafka:
+  sentry-kafka-log:
+  sentry-clickhouse:
+  sentry-clickhouse-log:
+  sentry-seaweedfs:
+  sentry-symbolicator:
+  sentry-taskbroker:
+  sentry-relay:
+  sentry-secrets:
+  sentry-smtp:
+  sentry-smtp-log:
+  sentry-nginx-cache:
+  sentry-nginx-www:
