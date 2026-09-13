@@ -3,3 +3,4 @@
 NOTES.md
 docker-compose.flat.yaml
 *.tmp
+__pycache__/
