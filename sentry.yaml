@@ -438,6 +438,11 @@ services:
   symbolicator:
     <<: [*restart, *lim-m]
     image: "${SYMBOLICATOR_SA_IMAGE:-ghcr.io/softartisan-inc/symbolicator-sa:26.8.0}"
+    environment:
+      # La config bakee reference ${SYMBOLICATOR_STATSD_ADDR} et le binaire
+      # refuse de demarrer si la variable n'existe pas. Pas de statsd dans la
+      # stack : l'UDP part vers localhost et se perd, comme chez upstream.
+      SYMBOLICATOR_STATSD_ADDR: "127.0.0.1:8125"
     command: run -c /etc/symbolicator/config.yml
     volumes:
       - sentry-symbolicator:/data
@@ -448,6 +453,9 @@ services:
   symbolicator-cleanup:
     <<: [*restart, *lim-xs]
     image: "${SYMBOLICATOR_SA_IMAGE:-ghcr.io/softartisan-inc/symbolicator-sa:26.8.0}"
+    environment:
+      # Meme config bakee que symbolicator : meme variable requise.
+      SYMBOLICATOR_STATSD_ADDR: "127.0.0.1:8125"
     command: cleanup -c /etc/symbolicator/config.yml --repeat 1h
     volumes:
       - sentry-symbolicator:/data
@@ -489,7 +497,11 @@ services:
     <<: [*restart, *lim-s]
     image: "${TASKBROKER_SA_IMAGE:-ghcr.io/softartisan-inc/taskbroker-sa:26.8.0}"
     command: /opt/taskbroker -c /etc/taskbroker/config.yml
+    # Attendre sentry-bootstrap : c'est lui qui cree les topics taskworker*
+    # (upstream les cree AVANT de demarrer via install.sh ; sans cette attente,
+    # taskbroker boucle en crash tant que ses topics n'existent pas).
     depends_on:
+      <<: *bootstrapped
       kafka: *healthy
     environment:
       TASKBROKER_KAFKA_CLUSTERS__DEFAULT__ADDRESS: "kafka:9092"
