@@ -137,7 +137,7 @@ errors-only avec le réglage ci-dessous tourne sur **6 vCPU / 12 Go RAM + 8 Go d
 swap / NVMe**. Descendre sous 8 Go de RAM n'est pas raisonnable : ClickHouse et
 Kafka finiront par se faire tuer par l'OOM killer pendant les merges.
 
-La somme des `limits` du compose vaut ~16 Go, dont 1,5 Go pour les deux
+La somme des `limits` du compose vaut ~16,5 Go, dont 2 Go pour les deux
 one-shot d'initialisation. Ce sont des plafonds anti-fuite,
 pas des réservations : la consommation observée au repos est de 7 à 9 Go.
 

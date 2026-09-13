@@ -351,7 +351,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512M
+          # 512M etait tue par l'OOM killer (exit 137) : `snuba bootstrap
+          # --force` charge toutes les definitions de storages avant de migrer.
+          memory: 1G
 
   sentry-bootstrap:
     image: "${SENTRY_SA_IMAGE:-ghcr.io/softartisan-inc/sentry-sa:26.8.0}"

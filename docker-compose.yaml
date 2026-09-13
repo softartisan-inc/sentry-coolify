@@ -12,7 +12,7 @@
 # deployable depuis un simple fichier compose sous Coolify.
 #
 # Dimensionnement de reference : 6 vCPU, 12 Go RAM, 8 Go swap, NVMe.
-# La somme des `limits` vaut ~16 Go a dessein, dont 1,5 Go pour les deux
+# La somme des `limits` vaut ~16,5 Go a dessein, dont 2 Go pour les deux
 # one-shot d'init — ce sont des plafonds anti-fuite, pas des reservations.
 # Consommation reelle observee au repos : 7 a 9 Go.
 # ---------------------------------------------------------------------------
@@ -347,7 +347,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512M
+          # 512M etait tue par l'OOM killer (exit 137) : `snuba bootstrap
+          # --force` charge toutes les definitions de storages avant de migrer.
+          memory: 1G
 
   sentry-bootstrap:
     image: "${SENTRY_SA_IMAGE:-ghcr.io/softartisan-inc/sentry-sa:26.8.0}"

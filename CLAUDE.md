@@ -200,7 +200,7 @@ docker compose run --rm -v /backup:/backup sentry-bootstrap \
   importer `sentry_nodestore_s3` lit les settings Django à l'import →
   `find_spec` uniquement.
 - **Les `deploy.resources.limits` sont des plafonds anti-fuite, pas des
-  réservations.** Leur somme (~16 Go, dont 1,5 Go pour les deux one-shot d'init)
+  réservations.** Leur somme (~16,5 Go, dont 2 Go pour les deux one-shot d'init)
   dépasse volontairement la RAM cible (12 Go).
 - **Sortie du profil errors-only.** Réintroduire tracing / metrics / replays /
   profiling / crons / uptime demande ~29 services de plus et environ le double de
