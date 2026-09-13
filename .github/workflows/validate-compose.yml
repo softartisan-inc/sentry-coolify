@@ -22,7 +22,7 @@ jobs:
       - name: Verifier les deux fichiers compose
         run: |
           cp .env.example .env
-          echo "SERVICE_PASSWORD_SENTRYSECRET=ci-placeholder" >> .env
+          echo "SERVICE_PASSWORD_64_SENTRYSECRET=ci-placeholder" >> .env
           docker compose config --quiet
           docker compose -f sentry.yaml config --quiet
           echo "OK — $(docker compose config --services | wc -l) services"

@@ -105,7 +105,7 @@ jobs:
           cp .env.example .env
           # Valeurs factices : on ne teste que la syntaxe et la resolution
           # des ancres, pas le demarrage.
-          echo "SERVICE_PASSWORD_SENTRYSECRET=ci-placeholder" >> .env
+          echo "SERVICE_PASSWORD_64_SENTRYSECRET=ci-placeholder" >> .env
           docker compose config --quiet
           docker compose -f sentry.yaml config --quiet
           echo "OK — $(docker compose config --services | wc -l) services"

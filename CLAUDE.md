@@ -99,15 +99,16 @@ Ordre de démarrage : infrastructure (`postgres` → `pgbouncer`, `kafka`,
 `clickhouse`, `redis`, `seaweedfs`) → `snuba-bootstrap` → `sentry-bootstrap`
 (`service_completed_successfully`) → services applicatifs → `relay` → `nginx`.
 
-Le domaine passe par la variable magique Coolify `SERVICE_FQDN_SENTRY_80` sur le
-service `nginx` ; elle publie `${SERVICE_FQDN_SENTRY}`, consommée comme
+Le domaine passe par la variable magique Coolify `SERVICE_URL_SENTRY_80` sur le
+service `nginx` ; elle publie `${SERVICE_URL_SENTRY}` (URL complète avec schéma
+— attention : `SERVICE_FQDN_*` est l'hôte **nu**, sans schéma), consommée comme
 `SENTRY_SYSTEM_URL_PREFIX` par toute la stack. **Un changement de domaine exige un
 redéploiement**, pas un restart : Sentry lit l'URL au démarrage du process.
 
 ### Deux artefacts compose, pas un
 
 - `docker-compose.yaml` — usage interne. Publie un port (`SENTRY_BIND`, loopback par
-  défaut), et rend les secrets obligatoires (`${SERVICE_PASSWORD_SENTRYSECRET:?}`).
+  défaut), et rend les secrets obligatoires (`${SERVICE_PASSWORD_64_SENTRYSECRET:?}`).
 - `sentry.yaml` — template destiné à une PR sur `coollabsio/coolify`. Même contenu,
   plus l'en-tête de métadonnées (`# documentation:`, `# slogan:`, `# category:`,
   `# port: 80`), sans bloc `ports:` et sans les `:?` bloquants.
@@ -120,12 +121,12 @@ diff se limite aux différences attendues :
 diff docker-compose.yaml sentry.yaml
 ```
 
-Différences attendues, et rien d'autre (~65 lignes de diff) : l'en-tête
+Différences attendues, et rien d'autre (~67 lignes de diff) : l'en-tête
 (métadonnées Coolify vs commentaire interne), la suppression des `:?` sur
-`SERVICE_PASSWORD_SENTRYSECRET`, la suppression du défaut `http://localhost:9000`
-sur `SERVICE_FQDN_SENTRY`, le défaut `admin@example.com` sur `SENTRY_ADMIN_EMAIL`,
-le défaut vide (`:-`) retiré sur `SERVICE_PASSWORD_SENTRYADMIN`, et l'absence du
-bloc `ports:` de `nginx`.
+`SERVICE_PASSWORD_64_SENTRYSECRET`, la suppression du défaut
+`http://localhost:9000` sur `SERVICE_URL_SENTRY`, le défaut `admin@example.com`
+sur `SENTRY_ADMIN_EMAIL`, le défaut vide (`:-`) retiré sur
+`SERVICE_PASSWORD_SENTRYADMIN`, et l'absence du bloc `ports:` de `nginx`.
 
 
 ## Commandes
@@ -135,7 +136,7 @@ compose, telle que la CI l'exécute :
 
 ```bash
 cp .env.example .env
-echo "SERVICE_PASSWORD_SENTRYSECRET=ci-placeholder" >> .env
+echo "SERVICE_PASSWORD_64_SENTRYSECRET=ci-placeholder" >> .env
 docker compose config --quiet          # syntaxe + résolution des ancres
 docker compose config --services | wc -l   # doit donner 30
 docker compose -f sentry.yaml config --quiet   # le template (workflow validate-compose)
@@ -160,8 +161,8 @@ Aplatir le compose si le parseur Coolify bute sur les ancres YAML :
 docker compose -f docker-compose.yaml config > docker-compose.flat.yaml
 ```
 
-Attention : l'aplati rend `- SERVICE_FQDN_SENTRY_80` (forme liste) comme
-`SERVICE_FQDN_SENTRY_80: null` — si le champ Domains n'apparaît pas sur `nginx`
+Attention : l'aplati rend `- SERVICE_URL_SENTRY_80` (forme liste) comme
+`SERVICE_URL_SENTRY_80: null` — si le champ Domains n'apparaît pas sur `nginx`
 sous Coolify avec ce fichier, rétablir la forme liste à la main.
 
 Créer un compte admin a posteriori, ou exporter les données :
@@ -182,7 +183,9 @@ docker compose run --rm -v /backup:/backup sentry-bootstrap \
   par variable Coolify), les valeurs par défaut `:-ghcr.io/...` du compose
   **et** de `sentry.yaml`, et les mentions de version dans les en-têtes. Sauvegarder
   `sentry-postgres` et `sentry-clickhouse` avant.
-- **`KAFKA_HEAP_OPTS` doit toujours accompagner `KAFKA_MEM_LIMIT`.** Sans plafond
+- **`KAFKA_HEAP_OPTS` doit toujours accompagner `SENTRY_KAFKA_MEM_LIMIT`.**
+  (Préfixe `SENTRY_` volontaire : cp-kafka mappe les env `KAFKA_*` en propriétés
+  de broker.) Sans plafond
   explicite, la JVM ignore la limite du conteneur et réserve 25 % de la RAM hôte :
   cause n°1 d'OOM sur les instances Sentry auto-hébergées.
 - **Images amd64 uniquement.** Les images amont Sentry ne sont pas publiées en

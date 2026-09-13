@@ -77,16 +77,16 @@ et pose les labels Traefik.
 
 ```yaml
 environment:
-  - SERVICE_FQDN_SENTRY_80
+  - SERVICE_URL_SENTRY_80
 ```
 
 Le `80` est le port **interne** du conteneur nginx, pas le port public — le
 public reste 80/443 chez Traefik. Cette variable magique fait deux choses :
 elle fait apparaître le champ *Domains* sur ce service, et elle publie
-`${SERVICE_FQDN_SENTRY}` (URL complète) et `${SERVICE_URL_SENTRY}` (sans le
-schéma) pour toute la stack.
+`${SERVICE_URL_SENTRY}` (URL complète avec schéma) et `${SERVICE_FQDN_SENTRY}`
+(hôte nu, sans schéma) pour toute la stack.
 
-Les conteneurs Sentry consomment la première via `SENTRY_SYSTEM_URL_PREFIX`,
+Les conteneurs Sentry consomment `${SERVICE_URL_SENTRY}` via `SENTRY_SYSTEM_URL_PREFIX`,
 qui alimente `system.url-prefix`. C'est ce qui fait que les liens dans les
 e-mails d'alerte pointent vers le bon domaine, et que le CSRF ne rejette pas
 vos connexions.
@@ -167,11 +167,11 @@ ajoutez dans Coolify uniquement celles que vous voulez changer, elles prennent
 effet au redéploiement suivant.
 
 **Générées par Coolify** (leur simple présence dans le compose les déclenche,
-ne rien saisir) : `SERVICE_PASSWORD_SENTRYSECRET` (clé de signature des
-sessions et du CSRF — la changer invalide toutes les sessions),
+ne rien saisir) : `SERVICE_PASSWORD_64_SENTRYSECRET` (clé de signature des
+sessions et du CSRF, 64 caractères — la changer invalide toutes les sessions),
 `SERVICE_PASSWORD_SENTRYADMIN` (mot de passe du compte admin) et
-`SERVICE_FQDN_SENTRY` (publiée quand le domaine est posé sur le service
-`nginx`).
+`SERVICE_URL_SENTRY` (URL complète avec schéma, publiée quand le domaine est
+posé sur le service `nginx` ; sa jumelle `SERVICE_FQDN_SENTRY` est l'hôte nu).
 
 **À renseigner** : `SENTRY_ADMIN_EMAIL` et `SENTRY_MAIL_HOST` — voir
 `.env.example`.
@@ -182,7 +182,7 @@ sessions et du CSRF — la changer invalide toutes les sessions),
 |---|---|---|
 | `SENTRY_EVENT_RETENTION_DAYS` | `30` | Rétention des événements — le poste d'économie disque n°1 (défaut upstream : 90) |
 | `KAFKA_LOG_RETENTION_HOURS` | `3` | Durée de vie des messages Kafka (simple tampon ici) |
-| `KAFKA_MEM_LIMIT` | `1536M` | Plafond mémoire du conteneur Kafka — **toujours ajuster `KAFKA_HEAP_OPTS` avec** |
+| `SENTRY_KAFKA_MEM_LIMIT` | `1536M` | Plafond mémoire du conteneur Kafka — **toujours ajuster `KAFKA_HEAP_OPTS` avec** (préfixe `SENTRY_` : cp-kafka mappe les env `KAFKA_*` en propriétés de broker) |
 | `KAFKA_HEAP_OPTS` | `-Xmx768m -Xms768m` | Heap JVM explicite — sans lui, la JVM prend 25 % de la RAM de l'hôte |
 | `CLICKHOUSE_MEM_LIMIT` | `2G` | Plafond mémoire du conteneur ClickHouse |
 | `CLICKHOUSE_MEMORY_RATIO` | `0.6` | Part du plafond utilisable par le serveur ClickHouse |
