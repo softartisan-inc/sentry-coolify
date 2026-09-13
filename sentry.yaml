@@ -83,7 +83,9 @@ x-sentry: &sentry
     SENTRY_WEB_WORKERS: "${SENTRY_WEB_WORKERS:-2}"
     SENTRY_WEB_THREADS: "${SENTRY_WEB_THREADS:-4}"
     SENTRY_TASKWORKER_CONCURRENCY: "${SENTRY_TASKWORKER_CONCURRENCY:-2}"
-    SENTRY_MAIL_HOST: "${SENTRY_MAIL_HOST:-}"
+    # Jamais vide : sentry.conf.example.py en derive mail.list-namespace, et
+    # une valeur vide fait planter l'import du module e-mail (IndexError).
+    SENTRY_MAIL_HOST: "${SENTRY_MAIL_HOST:-localhost}"
     SENTRY_SMTP_HOST: "${SENTRY_SMTP_HOST:-}"
     SENTRY_SMTP_PORT: "${SENTRY_SMTP_PORT:-587}"
     SENTRY_SMTP_USERNAME: "${SENTRY_SMTP_USERNAME:-}"
@@ -325,7 +327,7 @@ services:
     # getsentry/self-hosted la reference sans tag, seul ecart a notre principe).
     image: "registry.gitlab.com/egos-tech/smtp:2.0.7"
     environment:
-      MAILNAME: "${SENTRY_MAIL_HOST:-}"
+      MAILNAME: "${SENTRY_MAIL_HOST:-localhost}"
     volumes:
       - sentry-smtp:/var/spool/exim4
       - sentry-smtp-log:/var/log/exim4

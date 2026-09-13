@@ -93,6 +93,15 @@ SENTRY_FEATURES["auth:register"] = _envbool("SENTRY_ALLOW_REGISTRATION", False)
 SENTRY_OPTIONS["auth.allow-registration"] = _envbool("SENTRY_ALLOW_REGISTRATION", False)
 
 
+# --- Filet : namespace e-mail jamais vide ----------------------------------
+# sentry.conf.example.py derive mail.list-namespace de SENTRY_MAIL_HOST ; une
+# valeur vide fait planter l'import du module e-mail au demarrage (IndexError
+# dans is_valid_dot_atom). Reparer ici, quel que soit l'environnement.
+if not (SENTRY_OPTIONS.get("mail.list-namespace") or "").strip():
+    SENTRY_OPTIONS["mail.list-namespace"] = "localhost"
+    SENTRY_OPTIONS["mail.from"] = "sentry@localhost"
+
+
 # --- SMTP ------------------------------------------------------------------
 # Si SENTRY_SMTP_HOST est fourni, on bypasse le conteneur `smtp` interne
 # (exim) au profit d'un relais externe : un service de moins a faire tourner.
