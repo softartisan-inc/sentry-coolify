@@ -177,7 +177,9 @@ docker compose run --rm -v /backup:/backup sentry-bootstrap \
 - **Une montée de version se fait release par release.** Les migrations Sentry ne
   supportent pas les sauts. Un bump touche : `ARG SELF_HOSTED_VERSION` et les `ARG
   *_IMAGE` du Dockerfile, `DEFAULT_VERSION` et le `default:` du workflow, les neuf
-  `*_SA_IMAGE` de `.env.example`, les valeurs par défaut `:-ghcr.io/...` du compose
+  `*_SA_IMAGE` du tableau « Variables d'environnement » du README (elles ne sont
+  plus dans `.env.example`, réduit au strict minimum — les surcharges se font
+  par variable Coolify), les valeurs par défaut `:-ghcr.io/...` du compose
   **et** de `sentry.yaml`, et les mentions de version dans les en-têtes. Sauvegarder
   `sentry-postgres` et `sentry-clickhouse` avant.
 - **`KAFKA_HEAP_OPTS` doit toujours accompagner `KAFKA_MEM_LIMIT`.** Sans plafond

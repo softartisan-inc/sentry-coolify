@@ -40,7 +40,7 @@ Six fichiers de code, quatre de documentation ou d'hygiène de dépôt.
 |---|---|---|
 | `Dockerfile` | Construit les 9 images (une cible par service qui a besoin d'un fichier de config). Télécharge la release upstream épinglée, applique les overlays. | C'est ce qui remplace les bind mounts impossibles sous Coolify. |
 | `docker-compose.yaml` | La stack : 30 services, leurs dépendances, plafonds mémoire, healthchecks, volumes. C'est le seul fichier que Coolify voit. | — |
-| `.env.example` | Toutes les variables, commentées : domaine, rétention, plafonds mémoire, parallélisme, SMTP. | Séparé pour être collé tel quel dans l'onglet Environment Variables de Coolify. |
+| `.env.example` | Le strict minimum à coller dans Coolify (`SENTRY_ADMIN_EMAIL`, `SENTRY_MAIL_HOST` + les `SERVICE_*` hors Coolify). Toutes les autres variables sont documentées dans la section « Variables d'environnement ». | Séparé pour être collé tel quel dans l'onglet Environment Variables de Coolify. |
 | `overlays/sentry.conf.append.py` | Configuration Sentry pilotée par l'environnement : `system.url-prefix`, CSRF, TLS derrière proxy, nodestore S3, workers uwsgi, SMTP. Concaténé à `sentry.conf.example.py` au build. | Fichier Python à part entière (~110 lignes) : l'inliner dans le Dockerfile le rendrait illisible. C'est le fichier que vous éditerez le plus souvent. |
 | `overlays/bootstrap.sh` | Remplace `install.sh` : crée le bucket S3 avec sa politique de rétention, joue les migrations Postgres, crée les topics Kafka et le compte admin. Idempotent. | Exécuté au runtime par le service `sentry-bootstrap`, pas au build. |
 | `.github/workflows/build-images.yml` | Construit et publie les 9 images sur GHCR. Valide aussi la syntaxe du compose. | — |
@@ -156,6 +156,56 @@ Sentry auto-hébergées.
 
 Côté disque, `SENTRY_EVENT_RETENTION_DAYS=30` au lieu de 90 divise par trois le
 volume ClickHouse et le bucket nodestore.
+
+---
+
+## Variables d'environnement
+
+`.env.example` ne contient volontairement que le strict minimum. Toutes les
+autres variables ont un défaut sain directement dans le compose (`${VAR:-…}`) :
+ajoutez dans Coolify uniquement celles que vous voulez changer, elles prennent
+effet au redéploiement suivant.
+
+**Générées par Coolify** (leur simple présence dans le compose les déclenche,
+ne rien saisir) : `SERVICE_PASSWORD_SENTRYSECRET` (clé de signature des
+sessions et du CSRF — la changer invalide toutes les sessions),
+`SERVICE_PASSWORD_SENTRYADMIN` (mot de passe du compte admin) et
+`SERVICE_FQDN_SENTRY` (publiée quand le domaine est posé sur le service
+`nginx`).
+
+**À renseigner** : `SENTRY_ADMIN_EMAIL` et `SENTRY_MAIL_HOST` — voir
+`.env.example`.
+
+**Optionnelles :**
+
+| Variable | Défaut | Rôle |
+|---|---|---|
+| `SENTRY_EVENT_RETENTION_DAYS` | `30` | Rétention des événements — le poste d'économie disque n°1 (défaut upstream : 90) |
+| `KAFKA_LOG_RETENTION_HOURS` | `3` | Durée de vie des messages Kafka (simple tampon ici) |
+| `KAFKA_MEM_LIMIT` | `1536M` | Plafond mémoire du conteneur Kafka — **toujours ajuster `KAFKA_HEAP_OPTS` avec** |
+| `KAFKA_HEAP_OPTS` | `-Xmx768m -Xms768m` | Heap JVM explicite — sans lui, la JVM prend 25 % de la RAM de l'hôte |
+| `CLICKHOUSE_MEM_LIMIT` | `2G` | Plafond mémoire du conteneur ClickHouse |
+| `CLICKHOUSE_MEMORY_RATIO` | `0.6` | Part du plafond utilisable par le serveur ClickHouse |
+| `REDIS_MAXMEMORY` | `384mb` | Plafond mémoire Valkey/Redis |
+| `SENTRY_WEB_WORKERS` | `2` | Workers uwsgi (~300 Mo chacun) |
+| `SENTRY_WEB_THREADS` | `4` | Threads par worker uwsgi |
+| `SENTRY_TASKWORKER_CONCURRENCY` | `2` | Process du taskworker (~300 Mo chacun) |
+| `SNUBA_UWSGI_PROCESSES` | `2` | Process uwsgi de l'API Snuba |
+| `SNUBA_UWSGI_THREADS` | `2` | Threads uwsgi de l'API Snuba |
+| `SENTRY_BIND` | `127.0.0.1:9000` | Port publié pour l'accès direct sans Traefik (loopback par défaut) |
+| `SENTRY_ALLOW_REGISTRATION` | `false` | Ouverture des inscriptions |
+| `SENTRY_CSRF_TRUSTED_ORIGINS` | *(vide)* | Origines CSRF supplémentaires, séparées par des virgules |
+| `SENTRY_SMTP_HOST` | *(vide)* | Relais SMTP externe — le renseigner bypasse le conteneur exim interne |
+| `SENTRY_SMTP_PORT` | `587` | Port du relais externe |
+| `SENTRY_SMTP_USERNAME` | *(vide)* | Identifiant du relais externe |
+| `SENTRY_SMTP_PASSWORD` | *(vide)* | Mot de passe du relais externe |
+| `SENTRY_SMTP_FROM` | *(vide)* | Adresse expéditrice |
+| `SENTRY_SMTP_USE_TLS` | `true` | STARTTLS vers le relais externe |
+| `SENTRY_SMTP_USE_SSL` | `false` | SSL implicite vers le relais externe |
+| `SENTRY_S3_ACCESS_KEY` / `SENTRY_S3_SECRET_KEY` | `sentry` / `sentry` | Credentials du stockage objet interne (SeaweedFS, jamais exposé) |
+| `SENTRY_MAX_EXTERNAL_SOURCEMAP_SIZE` | `1M` | Taille max des sourcemaps externes (memcached `-I`) |
+| `SENTRY_KAFKA_MAX_POLL_INTERVAL_MS` | `300000` | À augmenter si des consumers sont expulsés du groupe sous charge |
+| `SENTRY_SA_IMAGE` … `VALKEY_SA_IMAGE` | tags GHCR `26.8.0` épinglés | Les 9 images de la stack — c'est par elles que passe une montée de version |
 
 ---
 
